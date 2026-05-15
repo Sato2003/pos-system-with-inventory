@@ -13,6 +13,7 @@ import uploadRoutes from './routes/UploadRoutes.js'
 import shiftRoutes from './routes/ShiftRoutes.js'
 import refundRoutes from './routes/RefundRoutes.js'
 import settingsRoutes from './routes/SettingsRoutes.js'
+import fs from 'fs'  // ✅ fs import added
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -40,15 +41,14 @@ app.use('/api/auth', authRoutes)
 app.use('/api/users', userRoutes)
 app.use('/api/products', productRoutes)
 app.use('/api/sales', saleRoutes)
-app.use('/api/shifts', shiftRoutes)  // ← MOVE THIS HERE (after app is created)
+app.use('/api/shifts', shiftRoutes)
 app.use('/api/settings', settingsRoutes)
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }))
-app.use('/api/refunds',  refundRoutes)
-// Serve external product pictures
+app.use('/api/refunds', refundRoutes)
 
+// Serve external product pictures
 let productPicturesPath = path.join(__dirname, '../../product pictures')
-if (!require('fs').existsSync(productPicturesPath)) {
-  // Fallback for Render (create empty directory if needed)
+if (!fs.existsSync(productPicturesPath)) {
   productPicturesPath = path.join(__dirname, 'uploads/products')
   console.log('📁 Using fallback product pictures path:', productPicturesPath)
 }
@@ -57,7 +57,7 @@ app.use('/product-pictures', express.static(productPicturesPath))
 
 // Serve frontend static files
 const frontendPath = path.join(__dirname, '../frontend/dist')
-if (require('fs').existsSync(frontendPath)) {
+if (fs.existsSync(frontendPath)) {  // ✅ Changed require('fs') to fs
   console.log('📁 Serving frontend from:', frontendPath)
   app.use(express.static(frontendPath))
 } else {

@@ -1,5 +1,4 @@
 ﻿services:
-  # Backend API Service
   - type: web
     name: pos-backend
     runtime: node
@@ -15,7 +14,10 @@
         sync: false
       - key: PORT
         value: 10000
-
+    buildFilter:
+      paths:
+        - backend/**
+  
   # Frontend Static Service
   - type: web
     name: pos-frontend

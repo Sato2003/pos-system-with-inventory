@@ -45,14 +45,24 @@ app.use('/api/settings', settingsRoutes)
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }))
 app.use('/api/refunds',  refundRoutes)
 // Serve external product pictures
-const productPicturesPath = path.join(__dirname, '../../product pictures')
+
+let productPicturesPath = path.join(__dirname, '../../product pictures')
+if (!require('fs').existsSync(productPicturesPath)) {
+  // Fallback for Render (create empty directory if needed)
+  productPicturesPath = path.join(__dirname, 'uploads/products')
+  console.log('📁 Using fallback product pictures path:', productPicturesPath)
+}
 console.log('📁 Serving product pictures from:', productPicturesPath)
 app.use('/product-pictures', express.static(productPicturesPath))
 
 // Serve frontend static files
 const frontendPath = path.join(__dirname, '../frontend/dist')
-console.log('📁 Serving frontend from:', frontendPath)
-app.use(express.static(frontendPath))
+if (require('fs').existsSync(frontendPath)) {
+  console.log('📁 Serving frontend from:', frontendPath)
+  app.use(express.static(frontendPath))
+} else {
+  console.log('⚠️ Frontend dist folder not found, skipping static serving')
+}
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {

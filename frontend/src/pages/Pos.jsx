@@ -207,7 +207,7 @@ function HoldModal({ holds, onResume, onDelete, onClose, onHoldCurrent, hasCart 
 }
 
 // ─── Main POS Component ───────────────────────────────────────────────────────
-export default function POS() {
+export { POS }
   const { notify } = useApp()
 
   // User and Settings

@@ -4,7 +4,7 @@ import { AppProvider } from './context/AppContext'
 import Layout from './components/Layout'
 import Notification from './components/Notification'
 import Dashboard from './pages/Dashboard'
-import POS from './pages/POS'
+import POS from "./pages/Pos";
 import Login from './pages/Login'
 import Users from './pages/Users'
 import api from './utils/api'

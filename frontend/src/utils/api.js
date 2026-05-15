@@ -1,7 +1,12 @@
 import axios from 'axios'
 
+// Get the API URL from environment variables
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
+
+console.log('🔗 API URL:', API_URL)
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: `${API_URL}/api`,
   headers: { 'Content-Type': 'application/json' },
 })
 

@@ -1,0 +1,452 @@
+/**
+ * ReceiptPrinter.js
+ * WebUSB ESC/POS thermal printer driver with browser print fallback.
+ * Supports 58mm (32 chars) and 80mm (48 chars) paper widths.
+ */
+
+// ─── ESC/POS Constants ────────────────────────────────────────────────────────
+const ESC = 0x1b
+const GS  = 0x1d
+const LF  = 0x0a
+
+const CMD = {
+  INIT:         [ESC, 0x40],
+  ALIGN_LEFT:   [ESC, 0x61, 0x00],
+  ALIGN_CENTER: [ESC, 0x61, 0x01],
+  ALIGN_RIGHT:  [ESC, 0x61, 0x02],
+  BOLD_ON:      [ESC, 0x45, 0x01],
+  BOLD_OFF:     [ESC, 0x45, 0x00],
+  FONT_NORMAL:  [ESC, 0x21, 0x00],
+  FONT_TALL:    [ESC, 0x21, 0x10],
+  LINE_FEED:    [LF],
+  FEED_6:       [ESC, 0x64, 0x06],
+  CUT:          [GS,  0x56, 0x01],     // Partial cut
+  DRAWER_KICK:  [ESC, 0x70, 0x00, 0x19, 0xff],
+}
+
+const PAPER_COLS = { '58mm': 32, '80mm': 48 }
+
+// ─── ESC/POS Builder ──────────────────────────────────────────────────────────
+class EscPosBuilder {
+  constructor(paperWidth = '80mm') {
+    this._bytes = []
+    this._cols  = PAPER_COLS[paperWidth] ?? 48
+  }
+
+  get cols() { return this._cols }
+
+  _push(...items) {
+    for (const item of items) {
+      if (Array.isArray(item))
+        this._bytes.push(...item)
+      else if (typeof item === 'string')
+        for (let i = 0; i < item.length; i++) this._bytes.push(item.charCodeAt(i) & 0xff)
+      else
+        this._bytes.push(item & 0xff)
+    }
+    return this
+  }
+
+  lf(n = 1)    { for (let i = 0; i < n; i++) this._push(CMD.LINE_FEED); return this }
+  init()       { return this._push(CMD.INIT) }
+  left()       { return this._push(CMD.ALIGN_LEFT) }
+  center()     { return this._push(CMD.ALIGN_CENTER) }
+  right()      { return this._push(CMD.ALIGN_RIGHT) }
+  boldOn()     { return this._push(CMD.BOLD_ON) }
+  boldOff()    { return this._push(CMD.BOLD_OFF) }
+  fontNormal() { return this._push(CMD.FONT_NORMAL) }
+  fontTall()   { return this._push(CMD.FONT_TALL) }
+  text(s)      { return this._push(String(s)) }
+  cut()        { return this._push(CMD.FEED_6, CMD.CUT) }
+  openDrawer() { return this._push(CMD.DRAWER_KICK) }
+
+  line(str = '', { align = 'left', bold = false, tall = false } = {}) {
+    if (align === 'center') this.center()
+    else if (align === 'right') this.right()
+    else this.left()
+    if (tall) this.fontTall()
+    if (bold) this.boldOn()
+    this.text(str)
+    if (bold) this.boldOff()
+    this.fontNormal()
+    return this.lf()
+  }
+
+  divider(char = '-') {
+    return this.left().text(char.repeat(this._cols)).lf()
+  }
+
+  row(left, right, { bold = false } = {}) {
+    const l   = String(left)
+    const r   = String(right)
+    const pad = Math.max(1, this._cols - l.length - r.length)
+    return this.line(l + ' '.repeat(pad) + r, { bold })
+  }
+
+  build() { return new Uint8Array(this._bytes) }
+}
+
+// ─── Receipt ESC/POS builder ──────────────────────────────────────────────────
+export function buildReceiptBytes(sale, settings, currentUser) {
+  const b = new EscPosBuilder(settings.paperWidth || '58mm')
+
+  const peso = (n) => `₱${Number(n || 0).toFixed(2)}`
+  const now  = new Date(sale.createdAt || Date.now())
+  const date = now.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: '2-digit' })
+  const time = now.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+  const storeName   = settings.companyName    || 'MY STORE'
+  const storeAddr   = settings.companyAddress || ''
+  const storePhone  = settings.companyPhone   || ''
+  const footerMsg   = settings.receiptFooter  || 'Thank you for shopping!'
+  const cashierName = currentUser
+    ? `${currentUser.firstName || ''} ${currentUser.lastName || ''}`.trim()
+    : (sale.cashierName || 'Cashier')
+  const receiptNo   = sale.receiptNumber || (sale._id?.slice(-8).toUpperCase()) || 'N/A'
+
+  b.init()
+
+  // Store Header
+  b.center().boldOn().text(storeName).boldOff().lf()
+  if (storeAddr) {
+    // Split address into lines if too long
+    const addrLines = storeAddr.match(new RegExp(`.{1,${b.cols}}`, 'g')) || [storeAddr]
+    addrLines.forEach(line => b.center().text(line.trim()).lf())
+  }
+  if (storePhone) b.center().text(storePhone).lf()
+  b.lf()
+
+  // Receipt Header
+  b.divider('=')
+  b.center().boldOn().text('OFFICIAL RECEIPT').boldOff().lf()
+  b.divider('=')
+
+  // Transaction Details
+  b.left().text(`Receipt #: ${receiptNo}`).lf()
+  b.left().text(`Date: ${date}`).lf()
+  b.left().text(`Time: ${time}`).lf()
+  b.left().boldOn().text(`Cashier: ${cashierName}`).boldOff().lf()
+  b.divider('-')
+
+  // Items Header
+  b.center().boldOn().text('ITEMS').boldOff().lf()
+  b.divider('-')
+
+  // Items List
+  const items = sale.items || []
+  for (const item of items) {
+    const name     = item.productName || item.name || 'Item'
+    const qty      = item.quantity    || item.qty  || 1
+    const price    = item.unitPrice   || item.price || 0
+    const subtotal = item.subtotal    ?? qty * price
+
+    // Item name (truncate if too long)
+    const maxNameLen = b.cols - 2
+    const nameStr = name.length > maxNameLen ? name.slice(0, maxNameLen - 1) + '…' : name
+    b.left().text(nameStr).lf()
+
+    // Quantity x Price = Subtotal
+    const qtyPrice = `${qty} x ${peso(price)}`
+    const subtotalStr = peso(subtotal)
+    const padding = Math.max(1, b.cols - qtyPrice.length - subtotalStr.length)
+    b.left().text(qtyPrice + ' '.repeat(padding) + subtotalStr).lf()
+  }
+
+  b.divider('-')
+
+  // Totals
+  const subtotalAmt = sale.subtotal ?? items.reduce((s, i) =>
+    s + (i.subtotal ?? (i.price || 0) * (i.quantity || i.qty || 1)), 0)
+  const discount = sale.discount || 0
+  const tax      = sale.tax      || 0
+  const total    = sale.total    || 0
+
+  if (discount > 0) {
+    b.row('Subtotal:', peso(subtotalAmt))
+    b.row('Discount:', `-${peso(discount)}`)
+  }
+  b.row('VAT (12%):', peso(tax))
+  b.divider('=')
+  b.row('TOTAL:', peso(total), { bold: true })
+
+  // Payment info for cash transactions
+  if (sale.paymentMethod === 'cash') {
+    b.divider('-')
+    if (sale.amountPaid != null) b.row('Tendered:', peso(sale.amountPaid))
+    if (sale.change     != null) b.row('Change:',   peso(sale.change))
+  }
+
+  b.lf()
+  b.center().text(footerMsg).lf()
+  b.lf(2)
+  b.cut()
+
+  return b.build()
+}
+  b.divider('-')
+
+  if (sale.paymentMethod) b.row('Payment:', (sale.paymentMethod).toUpperCase())
+  if (sale.paymentMethod === 'cash') {
+    if (sale.amountPaid != null) b.row('Tendered:', peso(sale.amountPaid))
+    if (sale.change     != null) b.row('Change:',   peso(sale.change))
+  }
+
+  b.lf()
+  b.divider('=')
+  b.line(footerMsg, { align: 'center', bold: true })
+  b.divider('=')
+  b.lf(2)
+  b.cut()
+
+  return b.build()
+}
+
+// ─── WebUSB Printer ───────────────────────────────────────────────────────────
+class ThermalPrinter {
+  constructor() { this.device = null; this._ep = null }
+  get connected() { return !!this.device?.opened }
+
+  async connect() {
+    if (!navigator.usb) throw new Error('WebUSB not supported in this browser.')
+    this.device = await navigator.usb.requestDevice({
+      filters: [
+        { vendorId: 0x04b8 }, // Epson
+        { vendorId: 0x0519 }, // Star Micronics
+        { vendorId: 0x1504 }, // Bixolon
+        { vendorId: 0x0fe6 }, // Generic
+        { vendorId: 0x154f }, // SNBC
+        { vendorId: 0x0dd4 }, // Custom
+        { vendorId: 0x6868 }, // Generic
+      ],
+    })
+    await this.device.open()
+    if (this.device.configuration === null) await this.device.selectConfiguration(1)
+    const iface = this.device.configuration.interfaces[0]
+    await this.device.claimInterface(iface.interfaceNumber)
+    const alt = iface.alternate
+    this._ep = alt.endpoints.find(e => e.direction === 'out' && e.type === 'bulk')
+    if (!this._ep) throw new Error('No bulk OUT endpoint found on printer.')
+    return this
+  }
+
+  async disconnect() {
+    if (this.device?.opened) { await this.device.close(); this.device = null; this._ep = null }
+  }
+
+  async write(data) {
+    if (!this.connected) throw new Error('Printer not connected.')
+    const CHUNK = 64
+    for (let offset = 0; offset < data.length; offset += CHUNK) {
+      await this.device.transferOut(this._ep.endpointNumber, data.slice(offset, offset + CHUNK))
+    }
+  }
+}
+
+export const printer = new ThermalPrinter()
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+export async function printReceipt(sale, settings, currentUser) {
+  const copies = Math.max(1, Math.min(5, settings.copiesToPrint || 1))
+  const useUsb = settings.printerConnection === 'usb'
+
+  if (useUsb) {
+    try {
+      if (!printer.connected) await printer.connect()
+      const bytes = buildReceiptBytes(sale, settings, currentUser)
+      for (let i = 0; i < copies; i++) await printer.write(bytes)
+      return { method: 'usb', success: true }
+    } catch (err) {
+      console.warn('[ReceiptPrinter] USB failed, falling back to browser print:', err.message)
+    }
+  }
+
+  browserPrint(sale, settings, currentUser, copies)
+  return { method: 'browser', success: true }
+}
+
+export function browserPrint(sale, settings, currentUser, copies = 1) {
+  const paperWidth  = settings.paperWidth    || '80mm'
+  const mmWidth     = paperWidth === '58mm'  ? '58mm' : '80mm'
+  const storeName   = settings.companyName   || 'MY STORE'
+  const storeAddr   = settings.companyAddress || ''
+  const storePhone  = settings.companyPhone  || ''
+  const footerMsg   = settings.receiptFooter || 'Thank you for shopping!'
+  const cashierName = currentUser
+    ? `${currentUser.firstName || ''} ${currentUser.lastName || ''}`.trim()
+    : (sale.cashierName || 'Cashier')
+  const receiptNo   = sale.receiptNumber || (sale._id?.slice(-8).toUpperCase()) || 'N/A'
+  const peso        = (n) => `\u20b1${Number(n || 0).toFixed(2)}`
+  const now         = new Date(sale.createdAt || Date.now())
+  const date        = now.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: '2-digit' })
+  const time        = now.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const items       = sale.items || []
+  const discount    = sale.discount || 0
+  const subtotalAmt = sale.subtotal ?? items.reduce((s, i) => s + (i.subtotal ?? (i.price || 0) * (i.quantity || i.qty || 1)), 0)
+  const tax         = sale.tax   || 0
+  const total       = sale.total || 0
+
+  const itemsHtml = items.map(item => {
+    const name     = item.productName || item.name || 'Item'
+    const qty      = item.quantity    || item.qty  || 1
+    const price    = item.unitPrice   || item.price || 0
+    const subtotal = item.subtotal    ?? qty * price
+    return `<div class="item-name">${name}</div>
+      <div class="item-row"><span>${qty} &times; ${peso(price)}</span><span>${peso(subtotal)}</span></div>`
+  }).join('')
+
+  const discountHtml = discount > 0 ? `
+    <div class="total-row"><span>Subtotal</span><span>${peso(subtotalAmt)}</span></div>
+    <div class="total-row"><span>Discount</span><span>-${peso(discount)}</span></div>` : ''
+
+  const cashHtml = sale.paymentMethod === 'cash' ? `
+    ${sale.amountPaid != null ? `<div class="total-row"><span>Tendered</span><span>${peso(sale.amountPaid)}</span></div>` : ''}
+    ${sale.change != null     ? `<div class="total-row"><span>Change</span><span>${peso(sale.change)}</span></div>` : ''}` : ''
+
+  const receipt = `<div class="receipt">
+    <div class="store-name">${storeName}</div>
+    ${storeAddr  ? `<div class="info">${storeAddr}</div>`  : ''}
+    ${storePhone ? `<div class="info">${storePhone}</div>` : ''}
+    <div class="div-eq"></div>
+    <div class="heading">OFFICIAL RECEIPT</div>
+    <div class="div-eq"></div>
+    <div class="row"><span>Receipt #</span><span>${receiptNo}</span></div>
+    <div class="row"><span>Date</span><span>${date}</span></div>
+    <div class="row"><span>Time</span><span>${time}</span></div>
+    <div class="row cashier"><span>Cashier</span><span>${cashierName}</span></div>
+    <div class="div-dash"></div>
+    <div class="label">ITEMS</div>
+    <div class="div-dash"></div>
+    ${itemsHtml}
+    <div class="div-dash"></div>
+    ${discountHtml}
+    <div class="total-row"><span>VAT (12%)</span><span>${peso(tax)}</span></div>
+    <div class="div-dash"></div>
+    <div class="total-row grand"><span>TOTAL</span><span>${peso(total)}</span></div>
+    <div class="div-dash"></div>
+    ${sale.paymentMethod ? `<div class="total-row"><span>Payment</span><span>${(sale.paymentMethod || '').toUpperCase()}</span></div>` : ''}
+    ${cashHtml}
+    <div class="div-eq"></div>
+    <div class="footer">${footerMsg}</div>
+    <div class="div-eq"></div>
+  </div>`
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt ${receiptNo}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Courier New',monospace;font-size:12px;background:#fff;color:#000;width:${mmWidth};margin:0 auto}
+.receipt{width:100%;padding:4mm 3mm;page-break-after:always}
+.receipt:last-child{page-break-after:avoid}
+.store-name{font-size:15px;font-weight:bold;text-align:center;text-transform:uppercase;margin-bottom:2px}
+.info{text-align:center;font-size:10px;margin-bottom:1px}
+.div-eq{margin:3px 0;font-size:10px;overflow:hidden;white-space:pre}
+.div-eq::before{content:'================================'}
+.div-dash{margin:3px 0;font-size:10px;overflow:hidden;white-space:pre}
+.div-dash::before{content:'--------------------------------'}
+.heading{text-align:center;font-weight:bold;font-size:12px;margin:2px 0}
+.row{display:flex;justify-content:space-between;font-size:11px;margin:1px 0}
+.cashier{font-weight:bold;font-size:12px;background:#f5f5f5;padding:2px 0}
+.label{font-weight:bold;margin:2px 0}
+.item-name{font-size:11px;margin-top:3px}
+.item-row{display:flex;justify-content:space-between;font-size:11px;padding-left:4px;margin-bottom:2px}
+.total-row{display:flex;justify-content:space-between;font-size:11px;margin:1px 0}
+.grand{font-weight:bold;font-size:14px}
+.footer{text-align:center;font-weight:bold;font-size:11px;margin:3px 0}
+@media print{body{width:${mmWidth}}@page{margin:0;size:${mmWidth} auto}}
+</style></head><body>
+${Array(copies).fill(receipt).join('')}
+<script>window.onload=()=>{window.print();setTimeout(()=>window.close(),1500)}<\/script>
+</body></html>`
+
+  const win = window.open('', '_blank', 'width=420,height=650,toolbar=0,menubar=0,scrollbars=1')
+  if (win) { win.document.write(html); win.document.close() }
+}
+
+export const connectUsbPrinter    = () => printer.connect()
+export const disconnectUsbPrinter = () => printer.disconnect()
+export const isPrinterConnected   = () => printer.connected
+
+// ─── Test Print Function ──────────────────────────────────────────────────────
+export async function testPrint(settings = {}) {
+  const testSale = {
+    receiptNumber: 'TEST-001',
+    items: [
+      { productName: 'Test Product 1', quantity: 2, unitPrice: 50.00, subtotal: 100.00 },
+      { productName: 'Test Product 2', quantity: 1, unitPrice: 75.50, subtotal: 75.50 }
+    ],
+    subtotal: 175.50,
+    discount: 10.00,
+    tax: 14.84,
+    total: 180.34,
+    amountPaid: 200.00,
+    change: 19.66,
+    paymentMethod: 'cash',
+    cashierName: 'Test Cashier',
+    createdAt: new Date()
+  }
+
+  const testSettings = {
+    companyName: 'TEST STORE',
+    companyAddress: '123 Test Street, Test City',
+    companyPhone: '+63 123 456 7890',
+    receiptFooter: 'TEST RECEIPT - Please ignore',
+    paperWidth: '80mm',
+    copiesToPrint: 1,
+    printerConnection: 'browser',
+    ...settings
+  }
+
+  const testUser = { firstName: 'Test', lastName: 'Cashier' }
+
+  try {
+    await printReceipt(testSale, testSettings, testUser)
+    return { success: true, message: 'Test receipt printed successfully' }
+  } catch (error) {
+    console.error('Test print failed:', error)
+    return { success: false, message: `Test print failed: ${error.message}` }
+  }
+}
+
+// ─── Printer Status Check ─────────────────────────────────────────────────────
+export async function checkPrinterStatus() {
+  try {
+    if (!navigator.usb) {
+      return { available: false, reason: 'WebUSB not supported in this browser' }
+    }
+
+    const devices = await navigator.usb.getDevices()
+    const hasPrinter = devices.some(device => {
+      const vid = device.vendorId
+      const pid = device.productId
+      // Common thermal printer vendor IDs
+      return [0x04b8, 0x0519, 0x1504, 0x0fe6, 0x154f, 0x0dd4, 0x6868].includes(vid)
+    })
+
+    return {
+      available: true,
+      connected: hasPrinter,
+      devices: devices.length,
+      message: hasPrinter ? 'Printer connected' : 'No compatible printer found'
+    }
+  } catch (error) {
+    return { available: false, reason: `Error checking printer: ${error.message}` }
+  }
+}
+
+// ─── Setup Printer Connection ─────────────────────────────────────────────────
+export async function setupPrinter() {
+  try {
+    const status = await checkPrinterStatus()
+    if (!status.available) {
+      throw new Error(status.reason)
+    }
+
+    if (!status.connected) {
+      await connectUsbPrinter()
+      return { success: true, message: 'Printer connected successfully' }
+    }
+
+    return { success: true, message: 'Printer already connected' }
+  } catch (error) {
+    return { success: false, message: `Printer setup failed: ${error.message}` }
+  }
+}

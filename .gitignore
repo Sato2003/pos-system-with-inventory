@@ -1,0 +1,17 @@
+﻿node_modules/
+.env
+backend/node_modules/
+frontend/node_modules/
+.DS_Store
+*.log
+dist/
+build/
+product pictures/
+.env.local
+.env.development
+.env.production
+backend/.env
+frontend/.env
+*.swp
+*.swo
+*~
